@@ -1,14 +1,9 @@
 import numpy as np
-import pandas as pd
+from numpy import pi,exp
 import matplotlib.pyplot as plt
-import scipy.integrate as integrate
-import scipy.stats as stats
+from scipy.integrate import solve_ivp
 import astropy.units as u
 import astropy.constants as const
-import math
-from tqdm import tqdm
-from astropy.table import Table
-from astropy.io import ascii
 
 #Defining gauss in cgs base units
 cgsgauss = (u.g)**0.5*(u.s)**(-1)*(u.cm)**(-0.5)
@@ -17,271 +12,140 @@ cgsgauss = (u.g)**0.5*(u.s)**(-1)*(u.cm)**(-0.5)
 c = (const.c).cgs
 G = (const.G).cgs
 sigma = (const.sigma_sb).cgs
-k = (const.k_B).to(u.keV/u.K)
+k_B = (const.k_B).to(u.keV/u.K)
 
-#Fixed value functions
-def I_func(M_NS,R_NS):
-    I = 2*M_NS*(R_NS**2)/5
-    return I
+def I_fun(M_NS,R_NS):
+    return 2*M_NS*(R_NS**2)/5
 
-def mu_func(B,R_NS):
-    mu = B*(R_NS**3)
-    return mu
+def B_fun(t,B_i,B_decay=True):
+    if B_decay==False:
+        return B_i
+    else: 
+        B_min = np.minimum(B_i/2,2e+13)
+        B = B_i*exp(-(t/3.154e+07)/1e+06)/(1+((1e+06/(1e+19/B_i))*(1 - exp(-(t/3.154e+07)/1e+06))))
+        return np.maximum(B,B_min)
 
-def K_func(mu,I,c):
-    K = 2*(mu**2)/(3*(c**3)*I)
-    return K
+def mu_fun(t,B_i,R_NS,B_decay=True):
+    return B_fun(t,B_i,B_decay)*(R_NS**3)
 
-#Iterable value functions
-def R_m_func(Omega,delta,mu,rho_m,v_m):#Parameterized Magnetospheric Radius
-    exponent = 1/(delta+6)
-    numerator = (mu**2)*(v_m**(delta-2))
-    denominator = 8*math.pi*(Omega**delta)*(rho_m)
-    R_m = (numerator/denominator)**exponent
-    return R_m
+def Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction=True,B_decay=True):
+    Rm = ((1/(8*pi))*(mu_fun(t,B_i,R_NS,B_decay)**2)*(v_NS**(delta-2))*(Omega**(-delta))*(1/rho_0))**(1/(delta+6))
+    
+    if grav_correction == False or Rm>(2*G.to_value(u.cm**3/(u.g*u.s**2))*M_NS/(v_NS**2)):
+        return Rm
+    
+    else:
+        Rm_grav = (1/8*pi)*((2*G.to_value(u.cm**3/(u.g*u.s**2)*M_NS)**((delta-5)/2))*(mu_fun(t,B_i,R_NS,B_decay)**2)*(v_NS**3)*(Omega**(-delta))*(1/rho_0))**(2/(3*delta+7))
+        return Rm_grav
+    
+    #Dipole Phase spindown function
+def dipole_spindown_fun(t,Omega,gamma,delta,B_i,v_NS,rho_0,M_NS,R_NS,grav_correction=True,B_decay=True):
+    dOmega = -(2*(mu_fun(t,B_i,R_NS,B_decay)**2))/(3*((c.to_value(u.cm/u.s))**3)*I_fun(M_NS,R_NS))*(Omega**3)
+    return dOmega
 
-def R_L_func(Omega,c):#Light Cylinder Radius, Spindown transition when R_m=R_L
-    R_L = c/Omega
-    return R_L
+#Dipole Phase termination event
+def dipole_prop_transition(t,Omega,gamma,delta,B_i,v_NS,rho_0,M_NS,R_NS,grav_correction=True, B_decay=True):
+    return Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction,B_decay)-(c.to_value(u.cm/u.s)/Omega)
 
-def R_K_func(Omega,G,M_NS):#Keplerian orbit radius
-    R_K = (G*M_NS/(Omega**2))**(1/3)
-    return R_K
+#Propeller Phase spindown function
+def propeller_spindown_fun(t,Omega,gamma,delta, B_i, v_NS, rho_0, M_NS, R_NS, grav_correction=True, B_decay=True):
+    
+    if grav_correction == False or Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction,B_decay)>(2*G.to_value(u.cm**3/(u.g*u.s**2))*M_NS/(v_NS**2)):
+        dOmega = -(mu_fun(t,B_i,R_NS,B_decay)**2)*((Omega/v_NS)**(gamma-delta))*(Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction,B_decay)**(gamma-delta-3))/(8*I_fun(M_NS,R_NS))
+        return dOmega
+    
+    else:
+        dOmega_grav = -((2*G.to_value(u.cm**3/(u.g*u.s**2))*M_NS)**((delta-gamma)/2))*(mu_fun(t,B_i,R_NS,B_decay)**2)*(Omega**(gamma-delta))*(Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction,B_decay)**((3*(gamma-delta)-6)/2))/(8*I_fun(M_NS,R_NS))
+        return dOmega_grav
+    
+#Propeller Phase termination event
+def prop_accretion_transition(t,Omega,gamma, delta, B_i, v_NS, rho_0, M_NS, R_NS, grav_correction=True, B_decay=True):    
+    return Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction,B_decay)-((G.to_value(u.cm**3/(u.g*u.s**2))*M_NS/(Omega**2))**(1/3))
 
-def H_number_func(R_mvalue,Omega,v_m):#Supposed to be Mach number (M)
-    H_number = R_mvalue*Omega/v_m
-    return H_number
+class magnetar:
+    '''
+    Defining the magnetar object which houses the necessary functions for running a single instance of spindown.
+    
+    Parameters:
+    gamma: gamma exponent parameter (-1,0,1,2)
+    delta: delta exponent parameter (0,1,2)
+    B_i: initial value for the NS surface magnetic (in G)
+    v_NS: translational NS velocity (in km/s)
+    rho_0: density of material around the NS (in g/cm^3) [NOTE: want to change this to be in terms of molecules/cm^3]
+    P0: initial spin period of the NS at t0
+    t_obvs: age of the NS at the time of "observation" (in s) [NOTE: wnat to change this to be in terms of yrs?]
+    M_NS: mass of the NS (in M_sun)
+    R_NS: radius of the NS (in km)
+    t0: time to begin integration
+    grav_correction: toggle for enabling gravitational corrections (relevant for slower moving NSs)
+    B_decay: toggle for enabling magnetic field decay
+    dipole_only: toggle for dipole spindown only vs. dipole + propeller spindowns together
+    '''
 
-def B_func(t,B0,a,alpha):
-    B_min = min(B0/2,2e+13)
-    B_15 = B0/(1E+15)
-    t_yr = t/(3.154e+07)
-    tau_ohm = 1e+06
-    tau_Hall = 1e+04/B_15
-    numerator = math.exp(-t_yr/tau_ohm)
-    denominator = 1+(tau_ohm/tau_Hall)*(1 - math.exp(-t_yr/tau_ohm))
-    B = B0*numerator/denominator
-    return max(B,B_min)
-
-class Magnetar:
-    def __init__(self,M_NS,R_NS,gamma,delta,decay_a,decay_alpha,B0,v_m,rho_m,t0,P0,t_obvs):
-        self.M_NS_MSun = M_NS
-        self.M_NS = (M_NS*const.M_sun).cgs
-        self.R_NS = (R_NS*u.km).cgs
-        self.I = I_func(self.M_NS,self.R_NS)
+    def __init__(self, gamma, delta, B_i, v_NS, rho_0, P0, t_obvs, M_NS=1.4, R_NS=10, t0=0, 
+                 grav_correction=True, B_decay=True, dipole_only=False):
         self.gamma = gamma
         self.delta = delta
-        self.decay_a = decay_a
-        self.decay_alpha = decay_alpha
-        self.v_m = v_m*(u.cm/u.s)
-        self.rho_m = rho_m*(u.g/(u.cm**3))
-        self.t_obvs = t_obvs
+        self.B_i = B_i*cgsgauss
+        self.v_NS = v_NS*(u.km/u.s)
+        self.rho_0 = rho_0*(u.g/(u.cm**3))
+        self.P0 = P0*(u.s)
+        self.Omega0 = 2*pi/self.P0
+        self.t0 = t0*(u.s)
+        self.t_obvs = t_obvs*(u.s)
+        self.M_NS = M_NS*const.M_sun
+        self.R_NS = R_NS*u.km
+        self.grav_correction = grav_correction
+        self.B_decay = B_decay
+        self.dipole_only = dipole_only
+        
         self.obvs_type = '0'
-        self.distance = 0*u.kpc
-        self.M_dot = 0*(u.g/u.s)
-        self.kT_eff = 0*u.keV
 
-        self.P0 = P0
-        self.B0 = B0
-        self.t_arr = np.array([t0])
-        self.Omega_arr = np.array([2*math.pi/(self.P0)])
-        self.B_arr = np.array([self.B0])
-        self.P_arr = np.array([self.P0])
+    def run(self):
+
+        if self.dipole_only==True:
+            dipole_prop_transition.terminal=False
+            prop_accretion_transition.terminal=True
+        else:
+            dipole_prop_transition.terminal=True
+            prop_accretion_transition.terminal=True
         
-        self.mu = mu_func(self.B_arr[-1]*cgsgauss,self.R_NS)
-        self.K = K_func(self.mu,self.I,c)
-        self.R_m = R_m_func(self.Omega_arr[-1],self.delta,self.mu.value,self.rho_m.value,self.v_m.value)
-        self.R_L = R_L_func(self.Omega_arr[-1],c.value)
-        self.R_K = R_K_func(self.Omega_arr[-1],G.value,self.M_NS.value)
-        self.H_number = H_number_func(self.R_m,self.Omega_arr[-1],self.v_m.value)
-
-    #Dipole Phase Spindown
-    def DipoleSpindown(self,t,Omega):
-        dOmega = -(self.K.value)*(Omega**3)
-        return dOmega
-
-    #Propeller Phase Spindown
-    def PropSpindown(self,t,Omega):
-        dOmega = -(self.mu.value**2)*(self.H_number)**(self.gamma-self.delta)/(8*self.I.value*(self.R_m)**3)
-        return dOmega
-
-    def Integratedipole(self):
-        self.dOmega_arr = np.array([self.DipoleSpindown(self.t_arr[-1],self.Omega_arr[-1])])
+        dipole_integrator = solve_ivp(fun=dipole_spindown_fun,t_span=(self.t0.to_value(u.s),self.t_obvs.to_value(u.s)),y0=np.array([self.Omega0.to_value(1/u.s)]),
+                                      args=(self.gamma,self.delta,self.B_i.to_value(cgsgauss),self.v_NS.to_value(u.cm/u.s),self.rho_0.to_value(u.g/(u.cm**3)),self.M_NS.to_value(u.g),self.R_NS.to_value(u.cm),self.grav_correction,self.B_decay),
+                                      events=dipole_prop_transition,method='RK45',max_step=1E+12,rtol=1E-5,atol=1E-26)
         
-        #Dipole Phase Integrator
-        self.DipolePhaseInt = integrate.RK45(fun=self.DipoleSpindown,t0=self.t_arr[-1],y0=np.array([self.Omega_arr[-1]]),
-                                             t_bound=3.16e+16,rtol=1e-05,atol=1e-26,first_step=1e+07,max_step=1e+12)
-        #Dipole Phase Integration, stops once R_m>R_L
-        while self.R_m>self.R_L and self.t_arr[-1]<self.t_obvs:
-            self.DipolePhaseInt.step()
-            self.t_arr = np.append(self.t_arr,[self.DipolePhaseInt.t])
-            self.Omega_arr = np.append(self.Omega_arr,[self.DipolePhaseInt.y[0]])
-            self.P_arr = np.append(self.P_arr,[(2*math.pi)/self.Omega_arr[-1]])
-            self.dOmega_arr = np.append(self.dOmega_arr,[self.DipoleSpindown(self.t_arr[-1],self.Omega_arr[-1])])
-            self.B_arr = np.append(self.B_arr,[B_func(self.t_arr[-1],self.B_arr[0],self.decay_a,self.decay_alpha)])
-
-            self.mu = mu_func(self.B_arr[-1]*cgsgauss,self.R_NS)
-            self.K = K_func(self.mu,self.I,c)
-            self.R_m = R_m_func(self.Omega_arr[-1],self.delta,self.mu.value,self.rho_m.value,self.v_m.value)
-            self.R_L = R_L_func(self.Omega_arr[-1],c.value)
-            self.R_K = R_K_func(self.Omega_arr[-1],G.value,self.M_NS.value)
-            self.H_number = H_number_func(self.R_m,self.Omega_arr[-1],self.v_m.value)
-    
-        if len(self.B_arr)>1:
-            self.dOmega_arr = self.dOmega_arr[0:-1]
-            self.t_arr = self.t_arr[0:-1]
-            self.Omega_arr = self.Omega_arr[0:-1]
-            self.P_arr = self.P_arr[0:-1]
-            self.B_arr = self.B_arr[0:-1]
-            self.mu = mu_func(self.B_arr[-1]*cgsgauss,self.R_NS)
-            self.K = K_func(self.mu,self.I,c)
-                                          
-        #Dipole Phase Integrator
-        self.DipolePhaseInt = integrate.RK45(fun=self.DipoleSpindown,t0=self.t_arr[-1],y0=np.array([self.Omega_arr[-1]]),
-                                             t_bound=3.16e+16,rtol=1e-05,atol=1e-26,first_step=1e+07,max_step=1e+9)
-        #Dipole Phase Integration, stops once 0.9999*R_m>R_L
-        while 0.9999*self.R_m>self.R_L and self.t_arr[-1]<0.9999*self.t_obvs:
-            self.DipolePhaseInt.step()
-            self.t_arr = np.append(self.t_arr,[self.DipolePhaseInt.t])
-            self.Omega_arr = np.append(self.Omega_arr,[self.DipolePhaseInt.y[0]])
-            self.P_arr = np.append(self.P_arr,[(2*math.pi)/self.Omega_arr[-1]])
-            self.dOmega_arr = np.append(self.dOmega_arr,[self.DipoleSpindown(self.t_arr[-1],self.Omega_arr[-1])])
-            self.B_arr = np.append(self.B_arr,[B_func(self.t_arr[-1],self.B_arr[0],self.decay_a,self.decay_alpha)])
-
-            self.mu = mu_func(self.B_arr[-1]*cgsgauss,self.R_NS)
-            self.K = K_func(self.mu,self.I,c)
-            self.R_m = R_m_func(self.Omega_arr[-1],self.delta,self.mu.value,self.rho_m.value,self.v_m.value)
-            self.R_L = R_L_func(self.Omega_arr[-1],c.value)
-            self.R_K = R_K_func(self.Omega_arr[-1],G.value,self.M_NS.value)
-            self.H_number = H_number_func(self.R_m,self.Omega_arr[-1],self.v_m.value)
-                                          
-        if self.t_arr[-1]>0.9999*self.t_obvs:
+        if self.dipole_only == True or dipole_integrator.t[-1]==self.t_obvs.to_value(u.s):
             self.obvs_type = '1'
-            self.distance = (self.v_m*self.t_obvs*u.s).to(u.kpc)
-            
-    def Integrateprop(self):
-        #Propellor Phase Integrator
-        self.PropPhaseInt = integrate.RK45(fun=self.PropSpindown,t0=self.t_arr[-1],y0=np.array([self.Omega_arr[-1]]),
-                                           t_bound=3.16e+16,rtol=1e-05,atol=1e-26,first_step=1e+07,max_step=1e+12)
-        #Dipole Phase Integration, stops once R_m>R_L
-        while self.R_m>self.R_K and self.t_arr[-1]<self.t_obvs and self.Omega_arr[-1]>0:
-            self.PropPhaseInt.step()
-            self.t_arr = np.append(self.t_arr,[self.PropPhaseInt.t])
-            self.Omega_arr = np.append(self.Omega_arr,[self.PropPhaseInt.y[0]])
-            self.P_arr = np.append(self.P_arr,[(2*math.pi)/self.Omega_arr[-1]])
-            self.dOmega_arr = np.append(self.dOmega_arr,[self.PropSpindown(self.t_arr[-1],self.Omega_arr[-1])])
-            self.B_arr = np.append(self.B_arr,[B_func(self.t_arr[-1],self.B_arr[0],self.decay_a,self.decay_alpha)])
-
-            self.mu = mu_func(self.B_arr[-1]*cgsgauss,self.R_NS)
-            self.K = K_func(self.mu,self.I,c)
-            self.R_m = R_m_func(self.Omega_arr[-1],self.delta,self.mu.value,self.rho_m.value,self.v_m.value)
-            self.R_L = R_L_func(self.Omega_arr[-1],c.value)
-            self.R_K = R_K_func(self.Omega_arr[-1],G.value,self.M_NS.value)
-            self.H_number = H_number_func(self.R_m,self.Omega_arr[-1],self.v_m.value)
-
-        if len(self.B_arr)>1:
-            self.dOmega_arr = self.dOmega_arr[0:-1]
-            self.t_arr = self.t_arr[0:-1]
-            self.Omega_arr = self.Omega_arr[0:-1]
-            self.P_arr = self.P_arr[0:-1]
-            self.B_arr = self.B_arr[0:-1]
-            self.mu = mu_func(self.B_arr[-1]*cgsgauss,self.R_NS)
-            self.K = K_func(self.mu,self.I,c)
-
-        self.PropPhaseInt = integrate.RK45(fun=self.PropSpindown,t0=self.t_arr[-1],y0=np.array([self.Omega_arr[-1]]),
-                                           t_bound=3.16e+16,rtol=1e-05,atol=1e-26,first_step=1e+07,max_step=1e+09)
-        #Dipole Phase Integration, stops once R_m>R_L
-        while 0.9999*self.R_m>self.R_K and self.t_arr[-1]<0.9999*self.t_obvs and self.Omega_arr[-1]>0:
-            self.PropPhaseInt.step()
-            self.t_arr = np.append(self.t_arr,[self.PropPhaseInt.t])
-            self.Omega_arr = np.append(self.Omega_arr,[self.PropPhaseInt.y[0]])
-            self.P_arr = np.append(self.P_arr,[(2*math.pi)/self.Omega_arr[-1]])
-            self.dOmega_arr = np.append(self.dOmega_arr,[self.PropSpindown(self.t_arr[-1],self.Omega_arr[-1])])
-            self.B_arr = np.append(self.B_arr,[B_func(self.t_arr[-1],self.B_arr[0],self.decay_a,self.decay_alpha)])
-
-            self.mu = mu_func(self.B_arr[-1]*cgsgauss,self.R_NS)
-            self.K = K_func(self.mu,self.I,c)
-            self.R_m = R_m_func(self.Omega_arr[-1],self.delta,self.mu.value,self.rho_m.value,self.v_m.value)
-            self.R_L = R_L_func(self.Omega_arr[-1],c.value)
-            self.R_K = R_K_func(self.Omega_arr[-1],G.value,self.M_NS.value)
-            self.H_number = H_number_func(self.R_m,self.Omega_arr[-1],self.v_m.value)
-
-        #Overshoot contingency
-        if self.Omega_arr[-1]<0 and len(self.B_arr)>1:
-            self.dOmega_arr = self.dOmega_arr[0:-1]
-            self.t_arr = self.t_arr[0:-1]
-            self.Omega_arr = self.Omega_arr[0:-1]
-            self.P_arr = self.P_arr[0:-1]
-            self.B_arr = self.B_arr[0:-1]
-            self.mu = mu_func(self.B_arr[-1]*cgsgauss,self.R_NS)
-            self.K = K_func(self.mu,self.I,c)
-            
-            self.PropPhaseInt = integrate.RK45(fun=self.PropSpindown,t0=self.t_arr[-1],y0=np.array([self.Omega_arr[-1]]),
-                                           t_bound=3.16e+16,rtol=1e-05,atol=1e-26,first_step=1e+07,max_step=1e+10)
-            #Dipole Phase Integration, stops once R_m>R_L
-            while self.R_m>self.R_K and self.t_arr[-1]<self.t_obvs and self.Omega_arr[-1]>0:
-                self.PropPhaseInt.step()
-                self.t_arr = np.append(self.t_arr,[self.PropPhaseInt.t])
-                self.Omega_arr = np.append(self.Omega_arr,[self.PropPhaseInt.y[0]])
-                self.P_arr = np.append(self.P_arr,[(2*math.pi)/self.Omega_arr[-1]])
-                self.dOmega_arr = np.append(self.dOmega_arr,[self.PropSpindown(self.t_arr[-1],self.Omega_arr[-1])])
-                self.B_arr = np.append(self.B_arr,[B_func(self.t_arr[-1],self.B_arr[0],self.decay_a,self.decay_alpha)])
-
-                self.mu = mu_func(self.B_arr[-1]*cgsgauss,self.R_NS)
-                self.K = K_func(self.mu,self.I,c)
-                self.R_m = R_m_func(self.Omega_arr[-1],self.delta,self.mu.value,self.rho_m.value,self.v_m.value)
-                self.R_L = R_L_func(self.Omega_arr[-1],c.value)
-                self.R_K = R_K_func(self.Omega_arr[-1],G.value,self.M_NS.value)
-                self.H_number = H_number_func(self.R_m,self.Omega_arr[-1],self.v_m.value)
-
-            if len(self.B_arr)>1:
-                self.dOmega_arr = self.dOmega_arr[0:-1]
-                self.t_arr = self.t_arr[0:-1]
-                self.Omega_arr = self.Omega_arr[0:-1]
-                self.P_arr = self.P_arr[0:-1]
-                self.B_arr = self.B_arr[0:-1]
-                self.mu = mu_func(self.B_arr[-1]*cgsgauss,self.R_NS)
-                self.K = K_func(self.mu,self.I,c)
-
-            self.PropPhaseInt = integrate.RK45(fun=self.PropSpindown,t0=self.t_arr[-1],y0=np.array([self.Omega_arr[-1]]),
-                                           t_bound=3.16e+16,rtol=1e-05,atol=1e-26,first_step=1e+07,max_step=1e+09)
-            #Dipole Phase Integration, stops once R_m>R_L
-            while 0.9999*self.R_m>self.R_K and self.t_arr[-1]<0.999*self.t_obvs and self.Omega_arr[-1]>0:
-                self.PropPhaseInt.step()
-                self.t_arr = np.append(self.t_arr,[self.PropPhaseInt.t])
-                self.Omega_arr = np.append(self.Omega_arr,[self.PropPhaseInt.y[0]])
-                self.P_arr = np.append(self.P_arr,[(2*math.pi)/self.Omega_arr[-1]])
-                self.dOmega_arr = np.append(self.dOmega_arr,[self.PropSpindown(self.t_arr[-1],self.Omega_arr[-1])])
-                self.B_arr = np.append(self.B_arr,[B_func(self.t_arr[-1],self.B_arr[0],self.decay_a,self.decay_alpha)])
-
-                self.mu = mu_func(self.B_arr[-1]*cgsgauss,self.R_NS)
-                self.K = K_func(self.mu,self.I,c)
-                self.R_m = R_m_func(self.Omega_arr[-1],self.delta,self.mu.value,self.rho_m.value,self.v_m.value)
-                self.R_L = R_L_func(self.Omega_arr[-1],c.value)
-                self.R_K = R_K_func(self.Omega_arr[-1],G.value,self.M_NS.value)
-                self.H_number = H_number_func(self.R_m,self.Omega_arr[-1],self.v_m.value)
-                                                                         
-        if self.t_arr[-1]>0.999*self.t_obvs:
-            self.obvs_type = '2'
-            self.distance = (self.v_m*self.t_obvs*u.s).to(u.kpc)
+            self.t_arr = dipole_integrator.t
+            self.Omega_arr = dipole_integrator.y[0]
+            self.dOmega_arr = dipole_spindown_fun(self.t_arr,self.Omega_arr,self.gamma,self.delta,self.B_i.to_value(cgsgauss),self.v_NS.to_value(u.cm/u.s),self.rho_0.to_value(u.g/(u.cm**3)),self.M_NS.to_value(u.g),self.R_NS.to_value(u.cm),self.grav_correction,self.B_decay)
             
         else:
-            self.obvs_type = '3'
-            self.distance = (self.v_m*self.t_arr[-1]*u.s).to(u.kpc)
-            self.M_dot = math.pi*(self.R_m**2)*self.v_m*self.rho_m*(u.cm**2)
-            self.kT_eff = k*(G*self.M_NS*self.M_dot/(4*math.pi*sigma*(self.R_NS**3)))**(1/4)
+            propeller_integrator = solve_ivp(fun=propeller_spindown_fun,t_span=(dipole_integrator.t[-1],self.t_obvs.to_value(u.s)),y0=np.array([dipole_integrator.y[0][-1]]),
+                                             args=(self.gamma,self.delta,self.B_i.to_value(cgsgauss),self.v_NS.to_value(u.cm/u.s),self.rho_0.to_value(u.g/(u.cm**3)),self.M_NS.to_value(u.g),self.R_NS.to_value(u.cm),self.grav_correction,self.B_decay),
+                                             events=prop_accretion_transition,method='RK45',max_step=1E+12,rtol=1E-5,atol=1E-26)
             
-        if self.Omega_arr[-1]<0:
-            self.obvs_type = '0'
-    
-    def ProdNumerOutput(self):
-        #Adding units to the arrays
-        self.t_arr_output = (self.t_arr*u.s).to(u.year)
-        self.Omega_arr_output = self.Omega_arr*(u.s**(-1))
-        self.Omega_dot_arr_output = self.dOmega_arr*(u.s**(-2))
-        self.P_arr_output = self.P_arr*(u.s)
-        self.B_arr_output = self.B_arr*cgsgauss
+            self.t_arr = np.append(dipole_integrator.t,propeller_integrator.t[1:])
+            self.Omega_arr = np.append(dipole_integrator.y[0],propeller_integrator.y[0][1:])
+            dipole_dOmega_arr = dipole_spindown_fun(dipole_integrator.t,dipole_integrator.y[0],self.gamma,self.delta,self.B_i.to_value(cgsgauss),self.v_NS.to_value(u.cm/u.s),self.rho_0.to_value(u.g/(u.cm**3)),self.M_NS.to_value(u.g),self.R_NS.to_value(u.cm),self.grav_correction,self.B_decay)
+            prop_dOmega_arr = propeller_spindown_fun(propeller_integrator.t[1:],propeller_integrator.y[0][1:],self.gamma,self.delta,self.B_i.to_value(cgsgauss),self.v_NS.to_value(u.cm/u.s),self.rho_0.to_value(u.g/(u.cm**3)),self.M_NS.to_value(u.g),self.R_NS.to_value(u.cm),self.grav_correction,self.B_decay)
+            self.dOmega_arr = np.append(dipole_dOmega_arr,prop_dOmega_arr)
+
+            if dipole_integrator.t[-1]==self.t_obvs.to_value(u.s):
+                self.obvs_type = '2'
+
+            else:
+                self.obvs_type = '3'
         
-        #Period Array
-        self.P_dot_arr = -self.dOmega_arr*(self.P_arr**2)/(2*math.pi)
-        self.P_dot_arr_output = -self.Omega_dot_arr_output*(self.P_arr_output**2)/(2*math.pi)
+        self.B_arr = (B_fun(self.t_arr,self.B_i.to_value(cgsgauss),B_decay=self.B_decay))*cgsgauss
+        self.t_arr = self.t_arr*u.s
+        self.Omega_arr = self.Omega_arr*(1/u.s)
+        self.dOmega_arr = self.dOmega_arr*(1/(u.s**2))
+        self.P_arr = 2*pi/(self.Omega_arr)
+        self.P_dot_arr = -(1/(2*pi))*self.dOmega_arr*(self.P_arr**2)
+        self.dP_arr = -2*pi*self.dOmega_arr/(self.Omega_arr**2)
+        self.distance = (self.v_NS*self.t_arr[-1]).to(u.kpc)
+
+        if self.obvs_type == '3':
+            M_dot = (((2*G.to(u.cm**3/(u.g*u.s**2))*self.M_NS.to(u.g))**2)*pi*self.rho_0/(self.v_NS**3)).to(u.g/u.s)
+            self.kT_eff = (k_B*(G.to(u.cm**3/(u.g*u.s**2))*self.M_NS*M_dot/(4*pi*sigma*(self.R_NS**3)))**(1/4)).to(u.keV)
