@@ -1,5 +1,5 @@
 import numpy as np
-from numpy import pi,exp
+from numpy import pi,exp,power
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 import astropy.units as u
@@ -15,32 +15,42 @@ sigma = (const.sigma_sb).cgs
 k_B = (const.k_B).to(u.keV/u.K)
 
 def I_fun(M_NS,R_NS):
-    return 2*M_NS*(R_NS**2)/5
+    return 2*M_NS*(power(R_NS,2))/5
 
 def B_fun(t,B_i,B_decay=True):
-    if B_decay==False:
-        return B_i
-    else: 
-        B_min = np.minimum(B_i/2,2e+13)
-        B = B_i*exp(-(t/3.154e+07)/1e+06)/(1+((1e+06/(1e+19/B_i))*(1 - exp(-(t/3.154e+07)/1e+06))))
-        return np.maximum(B,B_min)
+
+    return np.where(B_decay==False,B_i,
+                    np.maximum(B_i*exp(-(t/3.154e+07)/1e+06)/(1+((1e+06/(1e+19/B_i))*(1 - exp(-(t/3.154e+07)/1e+06)))),np.minimum(B_i/2,2e+13)))
+
+    #if B_decay==False:
+        #return B_i
+    #else: 
+        #B_min = np.minimum(B_i/2,2e+13)
+        #B = B_i*exp(-(t/3.154e+07)/1e+06)/(1+((1e+06/(1e+19/B_i))*(1 - exp(-(t/3.154e+07)/1e+06))))
+        #return np.maximum(B,B_min)
 
 def mu_fun(t,B_i,R_NS,B_decay=True):
-    return B_fun(t,B_i,B_decay)*(R_NS**3)
+    return B_fun(t,B_i,B_decay)*(power(R_NS,3))
 
 def Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction=True,B_decay=True):
-    Rm = ((1/(8*pi))*(mu_fun(t,B_i,R_NS,B_decay)**2)*(v_NS**(delta-2))*(Omega**(-delta))*(1/rho_0))**(1/(delta+6))
+
+    Rm = power((1/(8*pi))*(power(mu_fun(t,B_i,R_NS,B_decay),2))*(power(v_NS,delta-2))*(power(Omega,-delta))*(power(rho_0,-1)),1/(delta+6))
     
-    if grav_correction == False or Rm>(2*G.to_value(u.cm**3/(u.g*u.s**2))*M_NS/(v_NS**2)):
-        return Rm
+    return np.where(grav_correction == False or Rm>(2*G.to_value(u.cm**3/(u.g*u.s**2))*M_NS/(power(v_NS,2))),Rm,
+                    power((1/(8*pi))*power(2*G.to_value(u.cm**3/(u.g*u.s**2))*M_NS,(delta-5)/2)*power(mu_fun(t,B_i,R_NS,B_decay),2)*power(v_NS,3)*power(Omega,-delta)*power(rho_0,-1),2/(3*delta+7)))
+
+    #Rm = power((1/(8*pi))*(power(mu_fun(t,B_i,R_NS,B_decay),2))*(power(v_NS,delta-2))*(power(Omega,-delta))*(power(rho_0,-1)),1/(delta+6))
     
-    else:
-        Rm_grav = (1/8*pi)*((2*G.to_value(u.cm**3/(u.g*u.s**2)*M_NS)**((delta-5)/2))*(mu_fun(t,B_i,R_NS,B_decay)**2)*(v_NS**3)*(Omega**(-delta))*(1/rho_0))**(2/(3*delta+7))
-        return Rm_grav
+    #if grav_correction == False or Rm>(2*G.to_value(u.cm**3/(u.g*u.s**2))*M_NS/(power(v_NS,2))):
+        #return Rm
     
-    #Dipole Phase spindown function
+    #else:
+        #Rm_grav = (1/8*pi)*((2*G.to_value(u.cm**3/(u.g*u.s**2)*M_NS)**((delta-5)/2))*(mu_fun(t,B_i,R_NS,B_decay)**2)*(v_NS**3)*(Omega**(-delta))*(1/rho_0))**(2/(3*delta+7))
+        #return Rm_grav
+    
+#Dipole Phase spindown function
 def dipole_spindown_fun(t,Omega,gamma,delta,B_i,v_NS,rho_0,M_NS,R_NS,grav_correction=True,B_decay=True):
-    dOmega = -(2*(mu_fun(t,B_i,R_NS,B_decay)**2))/(3*((c.to_value(u.cm/u.s))**3)*I_fun(M_NS,R_NS))*(Omega**3)
+    dOmega = -(2*power(mu_fun(t,B_i,R_NS,B_decay),2))/(3*power((c.to_value(u.cm/u.s)),3)*I_fun(M_NS,R_NS))*power(Omega,3)
     return dOmega
 
 #Dipole Phase termination event
@@ -49,18 +59,22 @@ def dipole_prop_transition(t,Omega,gamma,delta,B_i,v_NS,rho_0,M_NS,R_NS,grav_cor
 
 #Propeller Phase spindown function
 def propeller_spindown_fun(t,Omega,gamma,delta, B_i, v_NS, rho_0, M_NS, R_NS, grav_correction=True, B_decay=True):
+    Rm = Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction,B_decay)
+    return np.where(grav_correction == False or Rm>(2*G.to_value(u.cm**3/(u.g*u.s**2))*M_NS/(power(v_NS,2))),
+                    -power(mu_fun(t,B_i,R_NS,B_decay),2)*power(Omega/v_NS,gamma-delta)*power(Rm,gamma-delta-3)/(8*I_fun(M_NS,R_NS)),
+                    -power(2*G.to_value(u.cm**3/(u.g*u.s**2))*M_NS,(delta-gamma)/2)*power(mu_fun(t,B_i,R_NS,B_decay),2)*power(Omega,gamma-delta)*power(Rm,(3*(gamma-delta)-6)/2)/(8*I_fun(M_NS,R_NS)))
     
-    if grav_correction == False or Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction,B_decay)>(2*G.to_value(u.cm**3/(u.g*u.s**2))*M_NS/(v_NS**2)):
-        dOmega = -(mu_fun(t,B_i,R_NS,B_decay)**2)*((Omega/v_NS)**(gamma-delta))*(Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction,B_decay)**(gamma-delta-3))/(8*I_fun(M_NS,R_NS))
-        return dOmega
+    #if grav_correction == False or Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction,B_decay)>(2*G.to_value(u.cm**3/(u.g*u.s**2))*M_NS/(v_NS**2)):
+        #dOmega = -(mu_fun(t,B_i,R_NS,B_decay)**2)*((Omega/v_NS)**(gamma-delta))*(Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction,B_decay)**(gamma-delta-3))/(8*I_fun(M_NS,R_NS))
+        #return dOmega
     
-    else:
-        dOmega_grav = -((2*G.to_value(u.cm**3/(u.g*u.s**2))*M_NS)**((delta-gamma)/2))*(mu_fun(t,B_i,R_NS,B_decay)**2)*(Omega**(gamma-delta))*(Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction,B_decay)**((3*(gamma-delta)-6)/2))/(8*I_fun(M_NS,R_NS))
-        return dOmega_grav
+    #else:
+        #dOmega_grav = -((2*G.to_value(u.cm**3/(u.g*u.s**2))*M_NS)**((delta-gamma)/2))*(mu_fun(t,B_i,R_NS,B_decay)**2)*(Omega**(gamma-delta))*(Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction,B_decay)**((3*(gamma-delta)-6)/2))/(8*I_fun(M_NS,R_NS))
+        #return dOmega_grav
     
 #Propeller Phase termination event
 def prop_accretion_transition(t,Omega,gamma, delta, B_i, v_NS, rho_0, M_NS, R_NS, grav_correction=True, B_decay=True):    
-    return Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction,B_decay)-((G.to_value(u.cm**3/(u.g*u.s**2))*M_NS/(Omega**2))**(1/3))
+    return Rm_fun(t,Omega,delta,B_i,rho_0,v_NS,M_NS,R_NS,grav_correction,B_decay)-power(G.to_value(u.cm**3/(u.g*u.s**2))*M_NS/(Omega**2),1/3)
 
 class magnetar:
     '''
